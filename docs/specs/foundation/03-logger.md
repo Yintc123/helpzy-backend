@@ -19,16 +19,28 @@
 // pkg/logger/logger.go
 type ctxKey struct{}
 
-// Init 由 main.go 在啟動時呼叫，依環境設定 log level 與格式
-func Init(env string) {
-    var level slog.Level
-    if env == "production" {
-        level = slog.LevelInfo
-    } else {
-        level = slog.LevelDebug
-    }
-    h := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})
+// Init 由 main.go 在啟動時呼叫。
+// level 為空字串時依 env 自動判斷（production → Info，其他 → Debug）；
+// 非空時以 LOG_LEVEL 覆寫（debug / info / warn / error）。
+func Init(env, level string) {
+    h := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+        Level: parseLevel(level, env),
+    })
     slog.SetDefault(slog.New(h))
+}
+
+func parseLevel(level, env string) slog.Level {
+    switch strings.ToLower(level) {
+    case "debug": return slog.LevelDebug
+    case "info":  return slog.LevelInfo
+    case "warn":  return slog.LevelWarn
+    case "error": return slog.LevelError
+    }
+    // 未指定 → 依環境預設
+    if env == "production" {
+        return slog.LevelInfo
+    }
+    return slog.LevelDebug
 }
 ```
 
@@ -38,9 +50,15 @@ func Init(env string) {
 
 ```go
 // pkg/logger/logger.go
+import "go.opentelemetry.io/otel/trace"
+
+type requestIDKey struct{}
+
 func WithRequestID(ctx context.Context, rid string) context.Context {
     l := From(ctx).With("request_id", rid)
-    return context.WithValue(ctx, ctxKey{}, l)
+    ctx = context.WithValue(ctx, ctxKey{}, l)
+    // 額外保存純字串，方便 httpx.WriteError 無需穿透 logger 取值
+    return context.WithValue(ctx, requestIDKey{}, rid)
 }
 
 func WithUserID(ctx context.Context, uid string) context.Context {
@@ -48,12 +66,29 @@ func WithUserID(ctx context.Context, uid string) context.Context {
     return context.WithValue(ctx, ctxKey{}, l)
 }
 
-// From 取出 context 內的 logger，若無則 fallback 至 slog.Default()
+// From 取出 context 內的 logger；若 ctx 內有 OTel span，自動補上 trace_id / span_id。
+// 沒有 logger 時 fallback 至 slog.Default()。
 func From(ctx context.Context) *slog.Logger {
-    if l, ok := ctx.Value(ctxKey{}).(*slog.Logger); ok {
-        return l
+    l := slog.Default()
+    if stored, ok := ctx.Value(ctxKey{}).(*slog.Logger); ok {
+        l = stored
     }
-    return slog.Default()
+    if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
+        sc := span.SpanContext()
+        l = l.With(
+            "trace_id", sc.TraceID().String(),
+            "span_id",  sc.SpanID().String(),
+        )
+    }
+    return l
+}
+
+// RequestIDFrom 取出當前 request_id（空字串代表 RequestID middleware 未掛或執行順序錯誤）
+func RequestIDFrom(ctx context.Context) string {
+    if rid, ok := ctx.Value(requestIDKey{}).(string); ok {
+        return rid
+    }
+    return ""
 }
 ```
 
@@ -96,7 +131,9 @@ func (s *UserService) GetUser(ctx context.Context, id string) (*models.User, err
 | `time` | slog 自動 | RFC3339 timestamp |
 | `level` | slog 自動 | 日誌等級 |
 | `msg` | 呼叫參數 | 日誌訊息 |
-| `request_id` | RequestID middleware | 串接同一請求所有日誌 |
+| `request_id` | RequestID middleware | 串接同一請求所有日誌（與 `trace_id` 共值，見 [16-observability.md](./16-observability.md)） |
+| `trace_id` | OTel span（如有） | 跨服務 trace；`From()` 自動帶入 |
+| `span_id` | OTel span（如有） | 當前 span ID |
 | `user_id` | JWT middleware | 已驗證使用者 ID |
 
 ---
@@ -112,4 +149,5 @@ func (s *UserService) GetUser(ctx context.Context, id string) (*models.User, err
 ## 測試策略
 
 - `From()` / `WithRequestID()` / `WithUserID()` 為純函式，以 table-driven test 覆蓋
+- `parseLevel` 以 table-driven test 涵蓋：`debug` / `info` / `warn` / `error` 大小寫、未指定時依 env 落回 Info / Debug
 - 驗證 logger 寫入欄位時，將 handler 改用 `slog.NewJSONHandler(buf, ...)`，斷言 JSON 輸出包含預期 key

@@ -41,6 +41,7 @@ func Struct(s any) error {
         if errors.As(err, &verrs) {
             return &apperror.AppError{
                 Code:    http.StatusBadRequest,
+                Kind:    "validation_failed",
                 Message: formatErrors(verrs),
             }
         }
@@ -105,8 +106,8 @@ type UpdateUserRequest struct {
 
 func (h *UserHandler) UpdateUser(w http.ResponseWriter, r *http.Request) error {
     var req UpdateUserRequest
-    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-        return apperror.BadRequest("invalid_json", "請求格式錯誤")
+    if err := httpx.DecodeJSON(r, &req); err != nil {
+        return err // 已涵蓋 invalid_json / payload_too_large 映射
     }
     if err := validator.Struct(req); err != nil {
         return err // 已是 *AppError，直接上拋給 httpx.Func

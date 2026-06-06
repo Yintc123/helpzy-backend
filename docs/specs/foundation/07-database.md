@@ -6,19 +6,23 @@
 
 ```go
 // pkg/database/postgres.go
+import (
+    "context"
+    "fmt"
+    "net/url"
+
+    "github.com/jackc/pgx/v5/pgxpool"
+)
+
 func New(c config.DBConfig) (*pgxpool.Pool, error) {
-    url := fmt.Sprintf(
-        "postgres://%s:%s@%s:%d/%s?sslmode=%s",
-        c.User, c.Password, c.Host, c.Port, c.Name, c.SSLMode,
-    )
-    cfg, err := pgxpool.ParseConfig(url)
+    cfg, err := pgxpool.ParseConfig(buildDSN(c))
     if err != nil {
         return nil, fmt.Errorf("parse db url: %w", err)
     }
-    cfg.MaxConns        = 20
-    cfg.MinConns        = 5
-    cfg.MaxConnLifetime = 1 * time.Hour
-    cfg.MaxConnIdleTime = 30 * time.Minute
+    cfg.MaxConns        = int32(c.MaxConns)
+    cfg.MinConns        = int32(c.MinConns)
+    cfg.MaxConnLifetime = c.MaxConnLifetime
+    cfg.MaxConnIdleTime = c.MaxConnIdleTime
 
     pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
     if err != nil {
@@ -26,18 +30,53 @@ func New(c config.DBConfig) (*pgxpool.Pool, error) {
     }
     return pool, nil
 }
+
+// buildDSN 用 net/url 組裝 PostgreSQL connection string，
+// 由 url.UserPassword 自動 percent-encode user / password 中的特殊字元
+// （@ : / ? # % 等），避免 fmt.Sprintf 直接拼接造成解析失敗。
+func buildDSN(c config.DBConfig) string {
+    u := &url.URL{
+        Scheme: "postgres",
+        User:   url.UserPassword(c.User, c.Password),
+        Host:   fmt.Sprintf("%s:%d", c.Host, c.Port),
+        Path:   c.Name,
+    }
+    q := u.Query()
+    q.Set("sslmode", c.SSLMode)
+    u.RawQuery = q.Encode()
+    return u.String()
+}
 ```
 
-**池參數**（目前 hardcoded，未來如需依環境調整再搬到 Config）：
+### 為什麼不用 `fmt.Sprintf` 直接拼
 
-| 參數 | 值 | 理由 |
-|------|-----|------|
-| `MaxConns` | 20 | 單實例上限；視 production 流量再調 |
-| `MinConns` | 5 | 維持暖連線避免冷啟動 |
-| `MaxConnLifetime` | 1h | 避免 DB 端 idle timeout |
-| `MaxConnIdleTime` | 30min | 釋放閒置連線 |
+`postgres://user:pass@host:port/db?sslmode=...` 是標準 URL，password 中的 `@` / `:` / `/` / `?` / `#` / `%` 都會打壞解析：
 
-> Migration 與 sqlc 規範見 [db-spec.md](./db-spec.md)。
+| Password | 直接拼結果 | 後果 |
+|----------|-----------|------|
+| `p@ss` | `postgres://u:p@ss@host:...` | 多一個 `@`，解析 host 失敗 |
+| `pa/ss` | `postgres://u:pa/ss@host/db` | path 部分混亂 |
+| `pa?ss` | `postgres://u:pa?ss@host/db` | `?` 被當 query 起點 |
+
+`url.UserPassword(user, pass)` 會把這些字元自動 percent-encode（`@` → `%40` 等），pgx 解析端再 decode 回原值，完全透明。Database 名稱 / host 中的特殊字元同樣由 `url.URL.String()` 處理。
+
+### 為什麼把 DSN 組裝獨立成 `buildDSN`
+
+- 純函式、無副作用 → 可單獨單元測試（table-driven 涵蓋各種特殊字元）
+- 與連線池建立（會打網路 I/O）解耦 → 測試不需要真的連 DB
+
+**池參數**（由 env 注入，預設值見 [02-config.md](./02-config.md)）：
+
+| 參數 | env | 預設 | 理由 |
+|------|-----|------|------|
+| `MaxConns` | `DB_MAX_CONNS` | `20` | 單實例上限；視 production 流量調整 |
+| `MinConns` | `DB_MIN_CONNS` | `5` | 維持暖連線避免冷啟動 |
+| `MaxConnLifetime` | `DB_MAX_CONN_LIFETIME` | `3600`s（1h） | 避免 DB 端 idle timeout |
+| `MaxConnIdleTime` | `DB_MAX_CONN_IDLE_TIME` | `1800`s（30min） | 釋放閒置連線 |
+
+> `pgxpool.Config.MaxConns` / `MinConns` 為 `int32`，從 `config.DBConfig` 的 `int` cast。`Validate()` 已確保值在合理範圍。
+
+> Migration 與 sqlc 規範見 [14-sqlc-and-migration.md](./14-sqlc-and-migration.md)。
 
 ---
 
@@ -171,9 +210,15 @@ func (s *OrderService) PlaceOrder(ctx context.Context, in PlaceOrderInput) error
 
 ## 測試策略
 
-- 以 `testcontainers` 啟動真實 Postgres
-- 測案：
-  - `WithTx` 中 fn 回傳 error → 資料未變更（rollback 生效）
-  - `WithTx` 中 fn 回傳 nil → 資料寫入（commit 生效）
-  - 巢狀 `WithTx` → 不重複 BEGIN，外層 commit 才真正寫入
-  - 未呼叫 `WithTx` 的查詢 → 走 pool，正常運作
+### `buildDSN`（純函式，table-driven）
+
+- 一般密碼 → 正常 DSN
+- 密碼含 `@` / `:` / `/` / `?` / `#` / `%` / 空白 / 中文 → percent-encoded，pgx 再 parse 回原值（round-trip 不變）
+- 空 SSLMode → query 不應出現 `sslmode=` 空值
+
+### `TxManager`（整合測試，testcontainers 啟動真實 Postgres）
+
+- `WithTx` 中 fn 回傳 error → 資料未變更（rollback 生效）
+- `WithTx` 中 fn 回傳 nil → 資料寫入（commit 生效）
+- 巢狀 `WithTx` → 不重複 BEGIN，外層 commit 才真正寫入
+- 未呼叫 `WithTx` 的查詢 → 走 pool，正常運作

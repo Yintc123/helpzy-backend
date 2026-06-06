@@ -1,6 +1,6 @@
 # API 規格書
 
-> Backend 對 BFF 提供的 RESTful API 規格。
+> Backend 提供給 Next.js 前端的 RESTful API 規格。
 
 ## 路由設計
 
@@ -34,7 +34,10 @@ r.Group(func(r chi.Router) {
 | Method | Path | JWT | 說明 |
 |--------|------|-----|------|
 | GET | `/api/health` | 否 | 健康檢查 |
-| POST | `/api/v1/auth/login` | 否 | 登入（BFF 呼叫） |
+| POST | `/api/v1/auth/register` | 否 | 註冊 |
+| POST | `/api/v1/auth/login` | 否 | 登入 |
+| POST | `/api/v1/auth/refresh` | 否 | 刷新 access token（rotation） |
+| POST | `/api/v1/auth/logout` | **是** | 登出（撤銷 access + refresh） |
 | GET | `/api/v1/users/{id}` | **是** | 取得使用者資料 |
 | PUT | `/api/v1/users/{id}` | **是** | 更新使用者資料 |
 
@@ -67,6 +70,5 @@ r.Group(func(r chi.Router) {
 
 ## 相關文件
 
-- [基礎架構規格](./backend-spec.md)
-- [JWT 驗證規格](./jwt-auth-spec.md)
-- [資料庫規格](./db-spec.md)
+- [Backend Foundation 規格](./backend-foundation-spec.md)
+- [JWT 跨服務契約](./jwt-auth-spec.md)

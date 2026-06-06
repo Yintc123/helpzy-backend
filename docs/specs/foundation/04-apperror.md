@@ -45,12 +45,13 @@ func (e *AppError) Is(target error) bool {
 
 ```go
 var (
-    ErrNotFound     = &AppError{Code: 404, Kind: "not_found",     Message: "資源不存在"}
-    ErrUnauthorized = &AppError{Code: 401, Kind: "unauthorized",  Message: "未授權"}
-    ErrForbidden    = &AppError{Code: 403, Kind: "forbidden",     Message: "權限不足"}
-    ErrBadRequest   = &AppError{Code: 400, Kind: "bad_request",   Message: "請求格式錯誤"}
-    ErrConflict     = &AppError{Code: 409, Kind: "conflict",      Message: "資源衝突"}
-    ErrInternal     = &AppError{Code: 500, Kind: "internal",      Message: "內部錯誤"}
+    ErrNotFound        = &AppError{Code: 404, Kind: "not_found",        Message: "資源不存在"}
+    ErrUnauthorized    = &AppError{Code: 401, Kind: "unauthorized",     Message: "未授權"}
+    ErrForbidden       = &AppError{Code: 403, Kind: "forbidden",        Message: "權限不足"}
+    ErrBadRequest      = &AppError{Code: 400, Kind: "bad_request",      Message: "請求格式錯誤"}
+    ErrConflict        = &AppError{Code: 409, Kind: "conflict",         Message: "資源衝突"}
+    ErrTooManyRequests = &AppError{Code: 429, Kind: "too_many_requests", Message: "請求過於頻繁"}
+    ErrInternal        = &AppError{Code: 500, Kind: "internal",         Message: "內部錯誤"}
 )
 ```
 
@@ -79,6 +80,10 @@ func Forbidden(kind, msg string) *AppError {
 
 func Conflict(kind, msg string) *AppError {
     return &AppError{Code: 409, Kind: kind, Message: msg}
+}
+
+func TooManyRequests(kind, msg string) *AppError {
+    return &AppError{Code: 429, Kind: kind, Message: msg}
 }
 
 // Internal wrap 任意底層錯誤；Message 對外不外洩細節

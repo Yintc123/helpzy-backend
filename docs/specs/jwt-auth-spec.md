@@ -1,215 +1,137 @@
-# JWT 驗證規格書
+# Backend ↔ Frontend 認證契約
 
-## 概覽
+> 本文件規範 **Go Backend 與 Next.js client 之間** 的認證 token 格式與流程，雙方都必須遵守。
+>
+> Backend 端的簽發 / 驗證 / 密碼 hash / Redis schema 等實作細節見 [foundation/15-auth.md](./foundation/15-auth.md)。
 
-Go Backend 透過驗證 JWT 識別請求來源是否為合法的 Next.js BFF。  
-JWT 由 BFF 產生並儲存於 Redis，每次請求時由 BFF 從 Redis 取出後放入 `Authorization` Header 轉發。
+## 角色定位
 
 ```
-Next.js BFF ──(Authorization: Bearer <JWT>)──► Go Backend
+User (browser)
+   │
+   ▼
+Next.js (client / SSR)            ← 持有 token、轉發請求；不持有 JWT_SECRET
+   │   Authorization: Bearer <access_token>
+   ▼
+Go Backend (authority)            ← 簽發 + 驗證 token；唯一持有 JWT_SECRET
+   │
+   ├── PostgreSQL  (users + 密碼 hash)
+   └── Redis       (refresh token + blacklist)
 ```
+
+| 角色 | 職責 |
+|------|------|
+| **Backend** | 簽發 / 驗證 access token；產生 / 儲存 / 撤銷 refresh token；密碼 hash 驗證；持有 `JWT_SECRET` |
+| **Next.js client** | 收 token、保存（建議 httpOnly cookie）、每次請求帶入 `Authorization` Header；**不持有 secret** |
 
 ---
 
-## JWT 規格
+## Token 設計
 
-### Header
+### Access Token（JWT）
 
+短期、stateless、由 Backend 用 `JWT_SECRET` 簽發；client 每次請求帶入。
+
+#### Header
 ```json
-{
-  "alg": "HS256",
-  "typ": "JWT"
-}
+{ "alg": "HS256", "typ": "JWT" }
 ```
 
-### Payload
-
+#### Payload
 ```json
 {
   "sub": "user-id",
   "role": "user",
-  "iss": "helpzy-bff",
+  "iss": "helpzy-backend",
+  "jti": "550e8400-e29b-41d4-a716-446655440000",
   "iat": 1700000000,
-  "exp": 1700003600
+  "exp": 1700000900
 }
 ```
 
 | 欄位 | 型別 | 說明 |
 |------|------|------|
 | `sub` | string | 使用者 ID |
-| `role` | string | 使用者角色（如 `user`、`admin`） |
-| `iss` | string | 簽發者，固定為 `helpzy-bff`，防止跨服務 token 混用 |
-| `iat` | int64 | 簽發時間（Unix timestamp） |
-| `exp` | int64 | 到期時間（簽發後 1 小時） |
+| `role` | string | 使用者角色 |
+| `iss` | string | 簽發者，固定為 `helpzy-backend` |
+| `jti` | string (UUID) | Token 唯一 ID；撤銷時加入 Redis blacklist |
+| `iat` | int64 | 簽發時間 |
+| `exp` | int64 | 到期時間（`iat + JWT_ACCESS_TTL`） |
 
-### 簽章
+#### 簽章
 
 | 屬性 | 值 |
 |------|----|
 | 演算法 | HS256 |
-| Secret | 環境變數 `JWT_SECRET`（與 BFF 共享，min 32 chars） |
+| Secret | `JWT_SECRET`（min 32 chars，僅 Backend 持有） |
+| 預設 TTL | 1 天（`JWT_ACCESS_TTL`） |
 
 ---
 
-## 請求格式
+### Refresh Token（Opaque）
 
-JWT 放置於每個需要驗證的 API 請求的 `Authorization` Header：
+長期、stateful、Backend 產生後**只回傳給 client 一次**；Redis 是單一真相。
 
-```
-Authorization: Bearer <token>
-```
+| 屬性 | 值 |
+|------|----|
+| 格式 | 32-byte 隨機（`crypto/rand`），base64url 編碼 |
+| **不是** JWT | 無 payload、不可解析——只是查表的 key |
+| 儲存位置 | Redis：`refresh:{token} → {user_id, exp}` |
+| 預設 TTL | 30 天（`JWT_REFRESH_TTL`） |
+| Rotation | 每次 `/auth/refresh` **撤銷舊 token、發新 token**（一次性） |
 
----
-
-## Middleware 規格
-
-### 職責
-
-`JWTMiddleware` 負責：
-
-1. 從 `Authorization` Header 取出 token
-2. 驗證 token 簽章（使用 `JWT_SECRET`）
-3. 驗證 `exp`（是否過期）
-4. 驗證 `alg` 必須為 `HS256`（防止 `alg: none` 攻擊）
-5. 驗證 `iss` 必須為 `helpzy-bff`
-6. 將 Payload 解析後注入至 `context.Context`，供後續 Handler 使用
-
-### 套用範圍
-
-| 路由 | 套用 JWTMiddleware |
-|------|--------------------|
-| `GET /api/health` | 否 |
-| 其他所有 `/api/v1/*` | **是** |
-
-### 錯誤回應
-
-| 情況 | HTTP Status | Body |
-|------|-------------|------|
-| Header 缺少 `Authorization` | 401 | `{"error": "missing token"}` |
-| Bearer 格式錯誤 | 401 | `{"error": "invalid token format"}` |
-| 簽章驗證失敗 | 401 | `{"error": "invalid token"}` |
-| Token 已過期 | 401 | `{"error": "token expired"}` |
-| 演算法不符 | 401 | `{"error": "invalid token"}` |
-| `iss` 不符 | 401 | `{"error": "invalid token"}` |
-
-> 所有驗證失敗一律回傳 401，不對外說明具體失敗原因，避免資訊洩漏。
+> **為什麼 refresh token 不用 JWT？** 既然 Backend 有 Redis 可隨時撤銷，refresh token 不需要 stateless 的特性；opaque token 更短、payload 不洩漏資訊、撤銷只要刪 key。Stateless JWT 用於高頻請求的 access token 才划算。
 
 ---
 
-## Context 注入規格
+## API 端點契約
 
-驗證成功後，將使用者資訊注入 `context.Context`，Handler 透過 context key 取用。
+> 完整路由規格見 [api-spec.md](./api-spec.md)。本表只列認證相關的契約面。
 
-### Context Key
+| 端點 | 用途 | 入參 | 回傳 |
+|------|------|-----|------|
+| `POST /api/v1/auth/register` | 註冊 | `{email, password}` | `{user, access_token, refresh_token}` |
+| `POST /api/v1/auth/login` | 登入 | `{email, password}` | `{user, access_token, refresh_token}` |
+| `POST /api/v1/auth/refresh` | 刷新 access token | `{refresh_token}` | `{access_token, refresh_token}`（新的一組） |
+| `POST /api/v1/auth/logout` | 登出 | `{refresh_token}` | 204 |
 
-```go
-type contextKey string
+### 登出行為
 
-const (
-    ContextKeyUserID contextKey = "userId"
-    ContextKeyRole   contextKey = "role"
-)
-```
-
-### 取用方式（在 Handler 內）
-
-```go
-userId := r.Context().Value(ContextKeyUserID).(string)
-role   := r.Context().Value(ContextKeyRole).(string)
-```
+1. 從 Redis 刪除 `refresh:{token}`（refresh token 立即失效）
+2. 將當前 access token 的 `jti` 加入 Redis blacklist，TTL 為剩餘 exp（讓 access token 也立即失效）
 
 ---
 
-## 檔案結構
+## 驗證規則（Backend 必須執行）
 
-```
-internal/
-└── middleware/
-    └── jwt.go              # JWTMiddleware 實作
-pkg/
-└── auth/
-    └── jwt.go              # JWT 解析、驗證邏輯（純函式，可單元測試）
-configs/
-└── .env.example            # JWT_SECRET 設定
-```
+每個帶 `Authorization: Bearer` 的請求都會經過以下驗證鏈：
 
-### 分層說明
+1. Bearer 格式正確
+2. 簽章驗證（HS256 + `JWT_SECRET`）
+3. `alg == HS256`（防 `alg: none`）
+4. `iss == helpzy-backend`
+5. `exp > now`（未過期）
+6. `jti` **不在** Redis blacklist 中
 
-- `pkg/auth/jwt.go`：純函式，只負責解析與驗證 JWT，不依賴 HTTP，方便單元測試
-- `internal/middleware/jwt.go`：HTTP Middleware，呼叫 `pkg/auth` 的函式，處理 HTTP 層的讀取與錯誤回應
-
----
-
-## 流程圖
-
-```
-Request
-  │
-  ▼
-JWTMiddleware
-  │
-  ├─ 取出 Authorization Header
-  │     └─ 缺少 → 401 missing token
-  │
-  ├─ 解析 Bearer token
-  │     └─ 格式錯誤 → 401 invalid token format
-  │
-  ├─ 驗證簽章（HS256 + JWT_SECRET）
-  │     └─ 失敗 → 401 invalid token
-  │
-  ├─ 驗證 exp
-  │     └─ 已過期 → 401 token expired
-  │
-  ├─ 驗證 alg == "HS256"
-  │     └─ 不符 → 401 invalid token
-  │
-  ├─ 驗證 iss == "helpzy-bff"
-  │     └─ 不符 → 401 invalid token
-  │
-  ├─ 注入 userId、role 至 context
-  │
-  └─ 呼叫 next handler
-```
-
----
-
-## 套件選擇
-
-| 套件 | 說明 |
-|------|------|
-| `github.com/golang-jwt/jwt/v5` | 官方維護的 JWT 套件，支援 HS256 |
+任一步失敗 → 401，對外訊息統一為 `未授權`，避免資訊洩漏；具體原因記錄在 server log。
 
 ---
 
 ## 環境變數
 
-| 變數 | 說明 |
-|------|------|
-| `JWT_SECRET` | JWT 簽署金鑰，與 Next.js BFF 共享（min 32 chars） |
+| 變數 | 必填 | 預設 | 說明 |
+|------|------|------|------|
+| `JWT_SECRET` | ✓ | — | HS256 簽署金鑰，僅 Backend 持有，min 32 chars |
+| `JWT_ACCESS_TTL` | ✗ | `86400` | Access token 有效期（秒，預設 1 天） |
+| `JWT_REFRESH_TTL` | ✗ | `2592000` | Refresh token 有效期（秒，預設 30 天） |
+| `BCRYPT_COST` | ✗ | `12` | 密碼 hash cost factor |
 
 ---
 
-## TDD 測試規格
+## 套件選擇
 
-### `pkg/auth/jwt.go` 單元測試
-
-| 測試案例 | 預期結果 |
-|----------|---------|
-| 有效 JWT | 回傳正確 userId、role |
-| 已過期的 JWT | 回傳 `token expired` 錯誤 |
-| 簽章錯誤的 JWT | 回傳 `invalid token` 錯誤 |
-| 空字串 | 回傳錯誤 |
-| alg 為 none 的 JWT | 回傳 `invalid token` 錯誤 |
-| `iss` 不符的 JWT | 回傳 `invalid token` 錯誤 |
-
-### `internal/middleware/jwt.go` 整合測試
-
-使用 `net/http/httptest` 模擬 HTTP 請求：
-
-| 測試案例 | 預期 HTTP Status |
-|----------|-----------------|
-| 有效 JWT | 200（呼叫 next handler） |
-| 無 Authorization Header | 401 |
-| Bearer 格式錯誤 | 401 |
-| 過期 JWT | 401 |
-| 簽章錯誤 JWT | 401 |
+| 端 | 套件 |
+|----|------|
+| Backend (Go) JWT | `github.com/golang-jwt/jwt/v5` |
+| Backend (Go) 密碼 | `golang.org/x/crypto/bcrypt` |
+| Next.js client | 由 frontend 規格決定（建議用 httpOnly cookie 儲存 token） |

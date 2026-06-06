@@ -16,23 +16,31 @@
 {
   "error": {
     "kind": "...",
-    "message": "..."
+    "message": "...",
+    "request_id": "4bf92f3577b34da6a3ce929d0e0e4736"
   }
 }
 ```
+
+`request_id`（與 `X-Request-ID` response header 共值）為 oncall debug 的入口；缺 RequestID middleware 時欄位省略。
 
 ### response 套件
 
 ```go
 // pkg/response/response.go
 
-// JSON 回傳成功回應；encode 失敗時回傳 error 供 httpx.Func 上拋
+// JSON 寫入成功回應。
+// 先 marshal 至 buffer、確認成功後才 WriteHeader——若先 WriteHeader 再 encode，
+// encode 失敗時 httpx.WriteError 會再寫一次 status，造成 superfluous WriteHeader
+// 警告，且 client 收到「200 + error body」的混合回應。
 func JSON(w http.ResponseWriter, status int, data any) error {
+    buf, err := json.Marshal(map[string]any{"data": data})
+    if err != nil {
+        return fmt.Errorf("marshal response: %w", err)
+    }
     w.Header().Set("Content-Type", "application/json")
     w.WriteHeader(status)
-    if err := json.NewEncoder(w).Encode(map[string]any{"data": data}); err != nil {
-        return fmt.Errorf("encode response: %w", err)
-    }
+    _, _ = w.Write(buf) // header 已送出；網路寫入失敗無法恢復，刻意忽略
     return nil
 }
 
@@ -75,14 +83,16 @@ func (f Func) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // WriteError 是整個系統錯誤回應的唯一出口
 func WriteError(w http.ResponseWriter, r *http.Request, err error) {
     log := logger.From(r.Context())
+    rid := logger.RequestIDFrom(r.Context()) // 缺值時為 ""，仍會 serialize 但無實質害處
 
     var appErr *apperror.AppError
     if !errors.As(err, &appErr) {
         // 未分類錯誤：500 + 完整 log
         log.Error("unhandled error", "err", err)
         response.Error(w, http.StatusInternalServerError, errorBody{
-            Kind:    apperror.ErrInternal.Kind,
-            Message: apperror.ErrInternal.Message,
+            Kind:      apperror.ErrInternal.Kind,
+            Message:   apperror.ErrInternal.Message,
+            RequestID: rid,
         })
         return
     }
@@ -102,16 +112,62 @@ func WriteError(w http.ResponseWriter, r *http.Request, err error) {
     }
 
     response.Error(w, appErr.Code, errorBody{
-        Kind:    appErr.Kind,
-        Message: appErr.Message,
+        Kind:      appErr.Kind,
+        Message:   appErr.Message,
+        RequestID: rid,
     })
 }
 
 type errorBody struct {
-    Kind    string `json:"kind"`
-    Message string `json:"message"`
+    Kind      string `json:"kind"`
+    Message   string `json:"message"`
+    RequestID string `json:"request_id,omitempty"` // 使用者回報問題時引用，oncall 直接以此 ID 查 trace / log
 }
 ```
+
+> **為什麼回傳 `request_id`**：使用者回報「我遇到錯誤 X」時，最不該發生的事是要求他重現。錯誤 body 帶上 `request_id`（= trace_id，見 [16-observability.md](./16-observability.md)）後，oncall 可直接用該 ID 在 log / trace 兩端定位。`omitempty` 避免 RequestID middleware 未掛時序列化空字串。
+
+---
+
+## DecodeJSON helper
+
+統一處理 JSON 解碼 + body size 超限——配合 `BodyLimit` middleware（見 [09-middleware.md](./09-middleware.md#bodylimit-middleware)）使用。
+
+```go
+// pkg/httpx/decode.go
+func DecodeJSON(r *http.Request, dst any) error {
+    if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+        var maxBytesErr *http.MaxBytesError
+        if errors.As(err, &maxBytesErr) {
+            return &apperror.AppError{
+                Code:    http.StatusRequestEntityTooLarge,
+                Kind:    "payload_too_large",
+                Message: "請求內容過大",
+                Err:     err,
+            }
+        }
+        return apperror.BadRequest("invalid_json", "請求格式錯誤").Wrap(err)
+    }
+    return nil
+}
+```
+
+### Handler 使用
+
+```go
+func (h *UserHandler) UpdateUser(w http.ResponseWriter, r *http.Request) error {
+    var req UpdateUserRequest
+    if err := httpx.DecodeJSON(r, &req); err != nil {
+        return err  // 自動處理 413 / 400
+    }
+    if err := validator.Struct(req); err != nil {
+        return err
+    }
+    // ...
+}
+```
+
+> 取代各 handler 各自寫 `json.NewDecoder(r.Body).Decode(&req)`——DRY、`MaxBytesError` 一次處理。
 
 ---
 
