@@ -19,3 +19,4 @@
 | 13 | [TDD 測試策略](./foundation/13-testing.md) | 各層測試方式、測試指令、命名規範 |
 | 14 | [SQL Migration & sqlc](./foundation/14-sqlc-and-migration.md) | golang-migrate、sqlc 工作流、Repository 包裝 pattern |
 | 15 | [Auth](./foundation/15-auth.md) | JWT 簽發/驗證、密碼 hash、Refresh token rotation + reuse detection、Family-level 撤銷、Middleware |
+| 16 | [可觀測性](./foundation/16-observability.md) | OpenTelemetry tracing + metrics、log correlation、自動化儀器 |
