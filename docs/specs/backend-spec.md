@@ -338,7 +338,19 @@ func (h *UserHandler) GetUser(w http.ResponseWriter, r *http.Request) {
 
 ```go
 // pkg/database/postgres.go
-func New(url string) *pgxpool.Pool {
+type Config struct {
+    Host     string
+    Port     string
+    User     string
+    Password string
+    DBName   string
+}
+
+func New(c Config) *pgxpool.Pool {
+    url := fmt.Sprintf(
+        "postgres://%s:%s@%s:%s/%s?sslmode=disable",
+        c.User, c.Password, c.Host, c.Port, c.DBName,
+    )
     cfg, _ := pgxpool.ParseConfig(url)
     cfg.MaxConns = 20
     cfg.MinConns = 5
@@ -352,7 +364,11 @@ func New(url string) *pgxpool.Pool {
 ### 環境變數
 
 ```
-DATABASE_URL=postgres://user:password@localhost:5432/helpzy?sslmode=disable
+DB_HOST=localhost
+DB_PORT=5432
+DB_USER=user
+DB_PASSWORD=password
+DB_NAME=helpzy
 ```
 
 > Migration 規範詳見 [資料庫規格書](./db-spec.md)。
@@ -385,7 +401,11 @@ REDIS_URL=redis://localhost:6379
 |------|------|
 | `PORT` | 伺服器埠號（預設 `8080`） |
 | `ENV` | 執行環境（`development` / `production`） |
-| `DATABASE_URL` | PostgreSQL 連線字串 |
+| `DB_HOST` | PostgreSQL host |
+| `DB_PORT` | PostgreSQL port（預設 `5432`） |
+| `DB_USER` | PostgreSQL 使用者 |
+| `DB_PASSWORD` | PostgreSQL 密碼 |
+| `DB_NAME` | PostgreSQL 資料庫名稱 |
 | `REDIS_URL` | Redis 連線字串 |
 | `JWT_SECRET` | JWT 簽署金鑰（與 BFF 共享，min 32 chars） |
 | `ALLOWED_ORIGIN` | 允許的 CORS Origin（BFF 位址） |
