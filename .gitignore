@@ -1,0 +1,15 @@
+# Go binaries
+server
+bin/
+
+# Env files
+configs/.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
