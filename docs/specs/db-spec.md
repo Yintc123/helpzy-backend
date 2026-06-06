@@ -16,7 +16,7 @@
 
 - Migration 檔案放在 `db/migrations/`
 - 命名格式：`{序號}_{說明}.up.sql` / `{序號}_{說明}.down.sql`
-- 建議搭配 [golang-migrate](https://github.com/golang-migrate/migrate) 管理版本
+- 使用 [golang-migrate](https://github.com/golang-migrate/migrate) 管理版本，常用指令與決策理由詳見 [migration-golang-migrate](../decisions/migration-golang-migrate.md)
 
 ---
 

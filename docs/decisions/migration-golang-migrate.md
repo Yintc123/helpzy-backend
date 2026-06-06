@@ -16,10 +16,14 @@
 
 ## 常用指令
 
+連線字串由 `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` 組裝：
+
 ```bash
+DB_URL="postgres://$DB_USER:$DB_PASSWORD@$DB_HOST:$DB_PORT/$DB_NAME?sslmode=disable"
+
 # 執行所有 migration
-migrate -path db/migrations -database $DATABASE_URL up
+migrate -path db/migrations -database "$DB_URL" up
 
 # 回滾一個版本
-migrate -path db/migrations -database $DATABASE_URL down 1
+migrate -path db/migrations -database "$DB_URL" down 1
 ```
