@@ -124,7 +124,7 @@ CORS            ← 設定跨域 Header
 Recoverer       ← 捕捉 panic，回傳 500
   │
   ▼
-JWT（群組內）   ← 驗證 JWT，注入 userId / email 至 context
+JWT（群組內）   ← 驗證 JWT，注入 userId / role 至 context
   │
   ▼
 Timeout（群組內）← 設定請求最大執行時間
@@ -145,7 +145,7 @@ func (m *JWTMiddleware) Verify(next http.Handler) http.Handler {
             return
         }
         ctx := context.WithValue(r.Context(), ContextKeyUserID, claims.Sub)
-        ctx  = context.WithValue(ctx, ContextKeyEmail, claims.Email)
+        ctx  = context.WithValue(ctx, ContextKeyRole, claims.Role)
         next.ServeHTTP(w, r.WithContext(ctx))
     })
 }
@@ -176,7 +176,7 @@ type contextKey string
 
 const (
     ContextKeyUserID contextKey = "userId"
-    ContextKeyEmail  contextKey = "email"
+    ContextKeyRole   contextKey = "role"
 )
 ```
 

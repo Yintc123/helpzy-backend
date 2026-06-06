@@ -27,7 +27,8 @@ Next.js BFF ──(Authorization: Bearer <JWT>)──► Go Backend
 ```json
 {
   "sub": "user-id",
-  "email": "user@example.com",
+  "role": "user",
+  "iss": "helpzy-bff",
   "iat": 1700000000,
   "exp": 1700003600
 }
@@ -36,7 +37,8 @@ Next.js BFF ──(Authorization: Bearer <JWT>)──► Go Backend
 | 欄位 | 型別 | 說明 |
 |------|------|------|
 | `sub` | string | 使用者 ID |
-| `email` | string | 使用者 Email |
+| `role` | string | 使用者角色（如 `user`、`admin`） |
+| `iss` | string | 簽發者，固定為 `helpzy-bff`，防止跨服務 token 混用 |
 | `iat` | int64 | 簽發時間（Unix timestamp） |
 | `exp` | int64 | 到期時間（簽發後 1 小時） |
 
@@ -69,7 +71,8 @@ Authorization: Bearer <token>
 2. 驗證 token 簽章（使用 `JWT_SECRET`）
 3. 驗證 `exp`（是否過期）
 4. 驗證 `alg` 必須為 `HS256`（防止 `alg: none` 攻擊）
-5. 將 Payload 解析後注入至 `context.Context`，供後續 Handler 使用
+5. 驗證 `iss` 必須為 `helpzy-bff`
+6. 將 Payload 解析後注入至 `context.Context`，供後續 Handler 使用
 
 ### 套用範圍
 
@@ -87,6 +90,7 @@ Authorization: Bearer <token>
 | 簽章驗證失敗 | 401 | `{"error": "invalid token"}` |
 | Token 已過期 | 401 | `{"error": "token expired"}` |
 | 演算法不符 | 401 | `{"error": "invalid token"}` |
+| `iss` 不符 | 401 | `{"error": "invalid token"}` |
 
 > 所有驗證失敗一律回傳 401，不對外說明具體失敗原因，避免資訊洩漏。
 
@@ -103,7 +107,7 @@ type contextKey string
 
 const (
     ContextKeyUserID contextKey = "userId"
-    ContextKeyEmail  contextKey = "email"
+    ContextKeyRole   contextKey = "role"
 )
 ```
 
@@ -111,7 +115,7 @@ const (
 
 ```go
 userId := r.Context().Value(ContextKeyUserID).(string)
-email  := r.Context().Value(ContextKeyEmail).(string)
+role   := r.Context().Value(ContextKeyRole).(string)
 ```
 
 ---
@@ -159,7 +163,10 @@ JWTMiddleware
   ├─ 驗證 alg == "HS256"
   │     └─ 不符 → 401 invalid token
   │
-  ├─ 注入 userId、email 至 context
+  ├─ 驗證 iss == "helpzy-bff"
+  │     └─ 不符 → 401 invalid token
+  │
+  ├─ 注入 userId、role 至 context
   │
   └─ 呼叫 next handler
 ```
@@ -188,11 +195,12 @@ JWTMiddleware
 
 | 測試案例 | 預期結果 |
 |----------|---------|
-| 有效 JWT | 回傳正確 userId、email |
+| 有效 JWT | 回傳正確 userId、role |
 | 已過期的 JWT | 回傳 `token expired` 錯誤 |
 | 簽章錯誤的 JWT | 回傳 `invalid token` 錯誤 |
 | 空字串 | 回傳錯誤 |
 | alg 為 none 的 JWT | 回傳 `invalid token` 錯誤 |
+| `iss` 不符的 JWT | 回傳 `invalid token` 錯誤 |
 
 ### `internal/middleware/jwt.go` 整合測試
 
