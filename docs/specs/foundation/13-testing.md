@@ -4,7 +4,10 @@
 
 | 層 | 測試方式 | 依賴 |
 |----|---------|------|
-| `pkg/auth` | 單元測試，純函式 | 無 |
+| `pkg/auth` | 單元測試，純函式（jwt / password / token / signedid） | 無 |
+| `pkg/authstore/refresh` | 整合測試（Save / Rotate 原子 + reuse detection / Revoke / TTL） | Redis（testcontainers） |
+| `pkg/authstore/revoke` | 整合測試（Revoke / IsRevoked / TTL） | Redis（testcontainers） |
+| `pkg/authstore/ticket` | 整合測試（Put / Take 原子 GETDEL / TTL） | Redis（testcontainers） |
 | `internal/config` | `t.Setenv` 模擬環境，覆蓋 required / default / 邊界 helper | 無 |
 | `pkg/logger` | 單元測試（buffer handler 斷言 JSON 欄位、含 OTel trace span 補欄位） | 無 |
 | `pkg/validator` | 單元測試（table-driven 涵蓋自訂規則） | 無 |
@@ -19,8 +22,8 @@
 | `internal/handlers` | `httptest` + mock service | mock |
 | `internal/services` | 單元測試 + mock repository / mock TxManager | mock |
 | `internal/repository` | 整合測試，連接真實測試 DB | PostgreSQL（testcontainers） |
-| `internal/repository/refresh` | 整合測試（Rotate 原子性 + reuse detection） | Redis（testcontainers） |
-| `internal/repository/revoke` | 整合測試（RevokeFamily / IsFamilyRevoked / TTL） | Redis（testcontainers） |
+| `internal/services/auth/payload` / `visitor` / `role` | 單元測試（payload 編解碼、cookie round-trip、role 列舉） | 無 |
+| `internal/services/auth/service` | 單元測試 + mock UserRepo + mock authstore | mock |
 | `db/queries` | `sqlc vet` 驗證 SQL 語法 | 無 |
 
 ---

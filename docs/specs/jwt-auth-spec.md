@@ -2,7 +2,7 @@
 
 > 本文件規範 **Go Backend 與 Next.js client 之間** 的認證 token 格式與流程，雙方都必須遵守。
 >
-> Backend 端的簽發 / 驗證 / 密碼 hash / Redis schema 等實作細節見 [foundation/15-auth.md](./foundation/15-auth.md)。
+> Backend 端的機制層（JWT 簽 / 驗、token store、family revocation）見 [foundation/15-auth-mechanism.md](./foundation/15-auth-mechanism.md)；政策層（login / register / refresh / users schema）見 [features/auth-feature-spec.md](./features/auth-feature-spec.md)。
 
 ## 角色定位
 
