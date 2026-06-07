@@ -18,5 +18,8 @@
 | 12 | [啟動與關閉](./foundation/12-startup.md) | main.go 骨架、優雅關閉順序、Docker |
 | 13 | [TDD 測試策略](./foundation/13-testing.md) | 各層測試方式、測試指令、命名規範 |
 | 14 | [SQL Migration & sqlc](./foundation/14-sqlc-and-migration.md) | golang-migrate、sqlc 工作流、Repository 包裝 pattern |
-| 15 | [Auth](./foundation/15-auth.md) | JWT 簽發/驗證、密碼 hash、Refresh token rotation + reuse detection、Family-level 撤銷、Middleware |
+| 15 | [Auth 機制層](./foundation/15-auth-mechanism.md) | JWT 簽 / 驗、bcrypt、opaque token、SignedID、RefreshStore / FamilyRevoker / TicketStore、JWT middleware（政策層 [auth-feature-spec.md](./features/auth-feature-spec.md)） |
 | 16 | [可觀測性](./foundation/16-observability.md) | OpenTelemetry tracing + metrics、log correlation、自動化儀器 |
+| 17 | [LLM Provider](./foundation/17-llm.md) | LLM 抽象層、Provider interface、Event stream、Registry、Canonical 型別 |
+| 18 | [開發路線與 Phase 1 main.go](./foundation/18-bootstrap.md) | Stage 1–6 實作順序、foundation-only 可跑骨架、smoke test |
+| 19 | [WebSocket Primitives](./foundation/19-websocket.md) | `pkg/wsx`：Accept / Heartbeat / Close 共用 helper、Origin 驗證 |
