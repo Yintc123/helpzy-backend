@@ -5,6 +5,8 @@
 管理 PostgreSQL schema 演進與型別安全的 query 生成，是所有 repository 共用的基礎建設。
 
 > Schema 設計（表 DDL、欄位約束）屬於業務規格，**不在本文件範圍**；本文件僅規範工具鏈與工作流。
+>
+> Foundation 階段需要的**第一個 migration**（`000001_create_users`）由 [features/auth-feature-spec.md §1](../features/auth-feature-spec.md) 規範——auth 機制能跑起來所需的最小 users 表。建議在 [18-bootstrap.md](./18-bootstrap.md) 的 **Stage 4** 套用，作為驗證 `TxManager` / `Executor(ctx)` / `repository` / sqlc 整套流程的具體標的。
 
 ---
 

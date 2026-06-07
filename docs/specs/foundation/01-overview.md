@@ -58,16 +58,39 @@ backend/
 │   ├── handlers/                 # Interface Adapters：處理 HTTP 請求與回應
 │   │   ├── user.go
 │   │   ├── user_test.go
+│   │   ├── auth.go               # 登入 / refresh / logout / ws-ticket
+│   │   ├── auth_test.go
+│   │   ├── ws.go                 # WebSocket upgrade（customer / agent）
+│   │   ├── ws_test.go
 │   │   ├── health.go             # /healthz、/readyz 端點
 │   │   └── health_test.go
 │   ├── services/                 # Use Cases：商業邏輯
 │   │   ├── user.go
-│   │   └── user_test.go
+│   │   ├── user_test.go
+│   │   ├── auth/                 # 政策層：login / register / refresh / logout / ws-ticket / link-visitor
+│   │   │   ├── service.go        # AuthService struct + 流程方法
+│   │   │   ├── payload.go        # ticket / refresh payload 編解碼
+│   │   │   ├── visitor.go        # VisitorID 業務型別 + cookie helper
+│   │   │   ├── role.go           # Role / WSTicketOrigin 列舉、originMatchesRole
+│   │   │   └── *_test.go
+│   │   ├── dispatcher/           # 即時對話 dispatcher（per-conversation goroutine）
+│   │   │   ├── dispatcher.go
+│   │   │   ├── session.go        # Session actor
+│   │   │   └── *_test.go
+│   │   └── llm/                  # LLM Provider 抽象與實作
+│   │       ├── provider.go       # 共通 interface 與 canonical 型別
+│   │       ├── registry.go
+│   │       ├── claude/           # 子 package：實作 llm.Provider
+│   │       └── mock/             # 上層測試用
 │   ├── repository/               # Interface Adapters：包裝 sqlc，實作 service 所需的 interface
 │   │   ├── user.go
-│   │   └── user_test.go
+│   │   ├── user_test.go
+│   │   ├── conversation.go       # PostgreSQL：對話與訊息（canonical schema）
+│   │   └── *_test.go
 │   ├── models/                   # Entities：純業務用資料結構（與 sqlc 生成的 struct 分離）
-│   │   └── user.go
+│   │   ├── user.go
+│   │   ├── conversation.go       # Conversation / Message / ContentBlock
+│   │   └── *.go
 │   └── testutil/                 # 整合測試共用 scaffold（build tag: integration）
 │       ├── postgres.go           # testcontainers Postgres singleton + migration + truncate
 │       └── redis.go              # testcontainers Redis singleton + FLUSHDB
@@ -93,9 +116,15 @@ backend/
 │   │   ├── ratelimit.go         # Redis-backed rate limit（redis_rate/v10）
 │   │   ├── secureheaders.go     # HSTS / nosniff / CSP 等
 │   │   └── timeout.go
-│   ├── auth/
-│   │   ├── jwt.go               # JWT 簽發 / 驗證 / refresh token 產生（純函式）
-│   │   └── password.go          # bcrypt hash / compare（純函式）
+│   ├── auth/                    # 機制層純函式（無業務知識）
+│   │   ├── jwt.go               # SignAccess / ParseAccess
+│   │   ├── password.go          # bcrypt hash / compare
+│   │   ├── token.go             # GenerateOpaqueToken / HashIP
+│   │   └── signedid.go          # SignedID + HMAC primitive
+│   ├── authstore/               # 機制層 Redis-backed primitives（payload opaque）
+│   │   ├── refresh.go           # RefreshStore: Save / Rotate / Revoke
+│   │   ├── revoke.go            # FamilyRevoker: Revoke / IsRevoked
+│   │   └── ticket.go            # TicketStore: Put / Take（GETDEL）
 │   ├── database/
 │   │   ├── postgres.go          # PostgreSQL 連線池初始化（含 otelpgx tracer）
 │   │   ├── tx.go                # TxManager：跨 repository 共用交易
@@ -137,6 +166,7 @@ require (
     // ── HTTP / 框架 ────────────────────────────────────────
     github.com/go-chi/chi/v5                          v5.x
     github.com/go-chi/cors                            v1.x  // CORS middleware
+    github.com/coder/websocket                        v1.x  // WebSocket（前 nhooyr/websocket）
 
     // ── 資料庫 / 快取 ───────────────────────────────────────
     github.com/jackc/pgx/v5                           v5.x

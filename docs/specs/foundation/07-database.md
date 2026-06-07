@@ -10,6 +10,7 @@ import (
     "context"
     "fmt"
     "net/url"
+    "time"
 
     "github.com/jackc/pgx/v5/pgxpool"
 )
@@ -27,6 +28,16 @@ func New(c config.DBConfig) (*pgxpool.Pool, error) {
     pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
     if err != nil {
         return nil, fmt.Errorf("create pool: %w", err)
+    }
+
+    // pgxpool 是 lazy connect — 沒 Ping 一下，DB 不可用要等到第一次查詢才會爆，
+    // 此時 server 已對外開放服務，錯誤路徑與啟動完全錯開、難以排查。
+    // 啟動階段同步 Ping 一次，把連線錯誤收斂到 fail-fast 流程。
+    pingCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    if err := pool.Ping(pingCtx); err != nil {
+        pool.Close()
+        return nil, fmt.Errorf("ping db: %w", err)
     }
     return pool, nil
 }
@@ -215,6 +226,12 @@ func (s *OrderService) PlaceOrder(ctx context.Context, in PlaceOrderInput) error
 - 一般密碼 → 正常 DSN
 - 密碼含 `@` / `:` / `/` / `?` / `#` / `%` / 空白 / 中文 → percent-encoded，pgx 再 parse 回原值（round-trip 不變）
 - 空 SSLMode → query 不應出現 `sslmode=` 空值
+
+### `New`（整合測試，testcontainers Postgres）
+
+- 連線參數正確 → 回有效 pool、err = nil
+- DB host 不通（不存在的 host 或 port）→ err 非 nil，訊息含 `ping db:`
+- 密碼錯誤 → err 非 nil（pgx 在 ping 階段回 auth failure）
 
 ### `TxManager`（整合測試，testcontainers 啟動真實 Postgres）
 

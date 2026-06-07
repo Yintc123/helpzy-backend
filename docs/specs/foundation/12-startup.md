@@ -53,32 +53,55 @@ func main() {
     }
     defer rdb.Close()
 
-    // DI 組裝
-    userRepo    := repository.NewUserRepo(pool)
-    refreshRepo := repository.NewRefreshRepo(rdb, cfg.JWT.RefreshTTL)
-    revokeRepo  := repository.NewRevokeRepo(rdb, cfg.JWT.RefreshTTL)
+    // ── 機制層（foundation）：authstore + JWT middleware ────────────────
+    refreshStore  := authstore.NewRefreshStore(rdb, cfg.JWT.RefreshTTL)
+    familyRevoker := authstore.NewFamilyRevoker(rdb, cfg.JWT.RefreshTTL)
+    ticketStore   := authstore.NewTicketStore(rdb, cfg.WSTicket.TTL)
+
+    // ── 政策層：repos + services ─────────────────────────────────
+    userRepo         := repository.NewUserRepo(pool)
+    conversationRepo := repository.NewConversationRepo(pool) // 實作 ConversationLinker、ChatRepo 等多個 interface
 
     userService := service.NewUserService(userRepo, txMgr)
-    authService := service.NewAuthService(userRepo, refreshRepo, revokeRepo, cfg.JWT, cfg.BcryptCost)
+    authService := authservice.New(
+        userRepo, conversationRepo, // conversationRepo 滿足 ConversationLinker
+        refreshStore, familyRevoker, ticketStore,
+        cfg.JWT, cfg.WSTicket, cfg.Visitor, cfg.BcryptCost,
+    )
+
+    // LLM Provider Registry
+    llmReg := llm.NewRegistry()
+    if cfg.LLM.ClaudeAPIKey != "" {
+        llmReg.Register(claude.New(cfg.LLM.ClaudeAPIKey, cfg.LLM.ClaudeDefaultModel, cfg.LLM.ClaudeAPIBaseURL))
+    }
+    llmReg.SetFallback(cfg.LLM.Provider)
+
+    // Chat dispatcher（per-conversation goroutine）
+    dispatcher := dispatcher.New(llmReg, conversationRepo, cfg.Chat)
 
     userHandler   := handlers.NewUserHandler(userService)
-    authHandler   := handlers.NewAuthHandler(authService)
-    healthHandler := handlers.NewHealthHandler(pool, cache.RedisPinger{Client: rdb})
+    authHandler   := handlers.NewAuthHandler(authService, *cfg)
+    wsHandler     := handlers.NewWSHandler(authService, dispatcher, cfg.WS)
+    healthHandler := handlers.NewHealthHandler(pool, cache.RedisPinger{Client: rdb}, cfg.App.HealthPingTimeout)
 
-    jwtMw   := middleware.NewJWTMiddleware(cfg.JWT.Secret, revokeRepo)
+    jwtMw   := middleware.NewJWTMiddleware(cfg.JWT.Secret, familyRevoker)
     limiter := middleware.NewLimiter(rdb)
 
     // 路由
+    //
+    // Middleware 套用順序對齊 [09-middleware.md](./09-middleware.md#套用順序)：
+    //   RequestID → Logger → Recoverer → SecureHeaders → CORS → BodyLimit
+    // 順序變更前請先閱讀 09-middleware 的「順序設計考量」表，每個位置都有原因。
     r := chi.NewRouter()
     r.Use(
         middleware.RequestID,
+        middleware.Logger,
+        middleware.Recoverer,
         middleware.SecureHeaders(middleware.SecureHeadersConfig{
             HSTSEnabled: cfg.App.Env == "production",
-            HSTSMaxAge:  31536000, // 1 年
+            HSTSMaxAge:  cfg.App.HSTSMaxAge,
         }),
-        middleware.Logger,
-        middleware.CORS(cfg.App.AllowedOrigin),
-        middleware.Recoverer,
+        middleware.CORS(cfg.App.AllowedOrigins, cfg.App.CORSMaxAge),
         middleware.BodyLimit(cfg.App.MaxBodyBytes),
     )
     httpx.Get(r, "/healthz", healthHandler.Live)
@@ -86,13 +109,22 @@ func main() {
 
     // 公開：註冊 / 登入 / 刷新（無需 JWT；以 IP 限流）
     r.Route("/api/v1/auth", func(r chi.Router) {
-        r.Use(middleware.Timeout(10 * time.Second))
+        r.Use(middleware.Timeout(cfg.App.AuthRequestTimeout))
         r.With(limiter.PerIP(redis_rate.PerMinute(cfg.RateLimit.LoginPerMinute), "login")).
             Method("POST", "/login", httpx.Func(authHandler.Login))
         r.With(limiter.PerIP(redis_rate.PerHour(cfg.RateLimit.RegisterPerHour), "register")).
             Method("POST", "/register", httpx.Func(authHandler.Register))
         r.With(limiter.PerIP(redis_rate.PerMinute(cfg.RateLimit.RefreshPerMinute), "refresh")).
             Method("POST", "/refresh", httpx.Func(authHandler.Refresh))
+    })
+
+    // 匿名訪客：從 visitor cookie 申請 anonymous WS ticket（不掛 JWT）
+    r.Route("/api/v1/anonymous", func(r chi.Router) {
+        r.Use(
+            middleware.Timeout(cfg.App.AnonymousRequestTimeout),
+            limiter.PerIP(redis_rate.PerMinute(cfg.RateLimit.AnonymousTicketPerMinute), "anon_ticket"),
+        )
+        r.Method("POST", "/ws-ticket", httpx.Func(authHandler.AnonymousWSTicket))
     })
 
     // 受保護：所有 /api/v1/* 其它路徑（JWT + user-based 限流）
@@ -102,9 +134,18 @@ func main() {
             limiter.PerUser(redis_rate.PerMinute(cfg.RateLimit.AuthedPerMinute), "authed"),
             middleware.Timeout(cfg.App.RequestTimeout),
         )
-        httpx.Post(r, "/api/v1/auth/logout", authHandler.Logout)
-        httpx.Get(r,  "/api/v1/users/{id}",  userHandler.GetUser)
-        httpx.Put(r,  "/api/v1/users/{id}",  userHandler.UpdateUser)
+        httpx.Post(r, "/api/v1/auth/logout",       authHandler.Logout)
+        httpx.Post(r, "/api/v1/auth/ws-ticket",    authHandler.WSTicket)
+        httpx.Post(r, "/api/v1/auth/link-visitor", authHandler.LinkVisitor)
+        httpx.Get(r,  "/api/v1/users/{id}",        userHandler.GetUser)
+        httpx.Put(r,  "/api/v1/users/{id}",        userHandler.UpdateUser)
+    })
+
+    // WebSocket 升級：以 ticket 驗證，不掛 JWT，不套 RequestTimeout（長連線）
+    r.Group(func(r chi.Router) {
+        // RequestID / Logger / Recoverer 仍套用；不用 BodyLimit（WS 升級無 body）
+        r.Get("/api/v1/ws/customer", wsHandler.Customer)
+        r.Get("/api/v1/ws/agent",    wsHandler.Agent)
     })
 
     // otelhttp 包在 chi 外面：下游 middleware（含 RequestID）可從 ctx 取得 span

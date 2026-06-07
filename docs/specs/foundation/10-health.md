@@ -29,12 +29,13 @@ type Pinger interface {
 }
 
 type HealthHandler struct {
-    db    Pinger
-    cache Pinger
+    db          Pinger
+    cache       Pinger
+    pingTimeout time.Duration // 由 cfg.App.HealthPingTimeout 注入
 }
 
-func NewHealthHandler(db, cache Pinger) *HealthHandler {
-    return &HealthHandler{db: db, cache: cache}
+func NewHealthHandler(db, cache Pinger, pingTimeout time.Duration) *HealthHandler {
+    return &HealthHandler{db: db, cache: cache, pingTimeout: pingTimeout}
 }
 
 func (h *HealthHandler) Live(w http.ResponseWriter, r *http.Request) error {
@@ -42,7 +43,7 @@ func (h *HealthHandler) Live(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (h *HealthHandler) Ready(w http.ResponseWriter, r *http.Request) error {
-    ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+    ctx, cancel := context.WithTimeout(r.Context(), h.pingTimeout)
     defer cancel()
 
     if err := h.db.Ping(ctx); err != nil {
@@ -54,6 +55,8 @@ func (h *HealthHandler) Ready(w http.ResponseWriter, r *http.Request) error {
     return response.JSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 ```
+
+> **為什麼 `pingTimeout` 由 constructor 注入而非每次呼叫帶入**：系統常數（不會隨呼叫變動），constructor 注入符合既有慣例（同 `RefreshStore.ttl`、`FamilyRevoker.ttl`、`TicketStore.ttl`）。實作環境的調校只發生在啟動階段。
 
 ---
 
@@ -72,3 +75,5 @@ httpx.Get(r, "/readyz",  healthHandler.Ready)
 
 - `Live`：純函式，斷言 200 + `{"data":{"status":"ok"}}`
 - `Ready`：以 mock `Pinger` interface 分別模擬 ping 成功 / 失敗，斷言狀態碼
+- `Ready` timeout：mock `Pinger.Ping` 內 `time.Sleep(pingTimeout * 2)`，斷言回傳 `context.DeadlineExceeded` 包成 500
+- `Ready` 採用注入的 `pingTimeout`：以不同 ctor 值（`50ms` / `500ms`）跑同一案例驗證 timeout 確實生效（非寫死 2s）
